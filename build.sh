@@ -103,6 +103,27 @@ else
     echo "🔏 Ad-hoc signed for local execution"
 fi
 
+NOTARY_PROFILE="${NOTARY_PROFILE:-AC_PASSWORD}"
+notarize_ok() {
+    [ "${SKIP_NOTARIZE:-0}" != "1" ] && [ -n "${IDENTITY}" ] \
+        && xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1
+}
+
+# 4b. Notarize the .app FIRST and staple its ticket, so the copy a user drags
+#     to /Applications validates even with no network. Stapling only the DMG
+#     leaves the app itself needing an online check on first launch.
+if notarize_ok; then
+    echo "🔐 Notarizing ${APP_NAME}.app…"
+    APP_ZIP="${BUILD_DIR}/${APP_NAME}-app.zip"
+    ditto -c -k --keepParent "${APP_DIR}" "${APP_ZIP}"
+    if xcrun notarytool submit "${APP_ZIP}" --keychain-profile "${NOTARY_PROFILE}" --wait; then
+        xcrun stapler staple "${APP_DIR}" && echo "📎 Stapled ticket to ${APP_NAME}.app"
+    else
+        echo "❌ App notarization failed — continuing unstapled."
+    fi
+    rm -f "${APP_ZIP}"
+fi
+
 # 5. Build DMG for Direct Distribution
 echo "💿 Creating DMG disk image..."
 DMG_STAGE="${BUILD_DIR}/dmg_stage"
@@ -125,13 +146,12 @@ fi
 
 # 6. Notarize & staple. Without this, Gatekeeper rejects the download for
 #    everyone who isn't the machine that built it ("Unnotarized Developer ID").
-NOTARY_PROFILE="${NOTARY_PROFILE:-AC_PASSWORD}"
 DMG_PATH="${DIST_DIR}/${APP_NAME}-${VERSION}.dmg"
 if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
     echo "⏭️  Skipping notarization (SKIP_NOTARIZE=1)."
 elif [ -z "${IDENTITY}" ]; then
     echo "⚠️  Ad-hoc signed — nothing to notarize."
-elif xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1; then
+elif notarize_ok; then
     echo "🔐 Submitting DMG for notarization (profile: ${NOTARY_PROFILE})…"
     if xcrun notarytool submit "${DMG_PATH}" --keychain-profile "${NOTARY_PROFILE}" --wait; then
         echo "📎 Stapling notarization ticket…"
