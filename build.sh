@@ -123,6 +123,30 @@ if [ -n "${IDENTITY}" ]; then
     echo "🔏 Signed DMG container with Developer ID: ${IDENTITY}"
 fi
 
+# 6. Notarize & staple. Without this, Gatekeeper rejects the download for
+#    everyone who isn't the machine that built it ("Unnotarized Developer ID").
+NOTARY_PROFILE="${NOTARY_PROFILE:-AC_PASSWORD}"
+DMG_PATH="${DIST_DIR}/${APP_NAME}-${VERSION}.dmg"
+if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
+    echo "⏭️  Skipping notarization (SKIP_NOTARIZE=1)."
+elif [ -z "${IDENTITY}" ]; then
+    echo "⚠️  Ad-hoc signed — nothing to notarize."
+elif xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1; then
+    echo "🔐 Submitting DMG for notarization (profile: ${NOTARY_PROFILE})…"
+    if xcrun notarytool submit "${DMG_PATH}" --keychain-profile "${NOTARY_PROFILE}" --wait; then
+        echo "📎 Stapling notarization ticket…"
+        xcrun stapler staple "${DMG_PATH}"
+        echo "✅ Notarized & stapled: ${DMG_PATH}"
+    else
+        echo "❌ Notarization failed. DMG is signed but NOT notarized."
+    fi
+else
+    echo "⚠️  Notary profile '${NOTARY_PROFILE}' not found — skipping notarization."
+    echo "    Create it once with:"
+    echo "      xcrun notarytool store-credentials \"${NOTARY_PROFILE}\" \\"
+    echo "        --apple-id <apple-id-email> --team-id V433H655PN --password <app-specific-password>"
+fi
+
 echo "✨ Direct DMG ready at ${DIST_DIR}/${APP_NAME}-${VERSION}.dmg"
 echo "✨ Built NoteBro.app at ${APP_DIR}"
 
