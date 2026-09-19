@@ -7,8 +7,31 @@ struct NoteCard: Identifiable, Codable, Equatable {
     var id: String
     var content: String
     var color: String // "yellow", "mint", "lavender", "peach", "sky"
+    var isPinned: Bool?
     var createdAt: Date
     var updatedAt: Date
+
+    var pinned: Bool {
+        get { isPinned ?? false }
+        set { isPinned = newValue }
+    }
+
+    var hashtags: [String] {
+        let pattern = "#([a-zA-Z0-9_-]+)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let nsString = content as NSString
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsString.length))
+        var tags = [String]()
+        for m in matches {
+            if m.numberOfRanges > 1 {
+                let tag = "#" + nsString.substring(with: m.range(at: 1)).lowercased()
+                if !tags.contains(tag) {
+                    tags.append(tag)
+                }
+            }
+        }
+        return tags
+    }
 
     static func defaultCard() -> NoteCard {
         NoteCard(
@@ -19,13 +42,15 @@ yo! welcome to NoteBro for Mac 📝
 • cursor is already blinking — just start typing
 • ⌘← and ⌘→ (or buttons above) flick between index cards
 • tap any pastel highlighter to color-code this card
+• use #hashtags like #ideas or #todo for instant filtering
 • ⌘N pulls a fresh card from the stack
 • ⌥Space brings NoteBro up from anywhere
 • close it or hit Esc — it's already saved
 
-zero folders. zero setup. zero friction.
+in a world of Word, be Notepad. zero friction.
 """,
             color: "yellow",
+            isPinned: true,
             createdAt: Date(),
             updatedAt: Date()
         )
@@ -127,6 +152,55 @@ class NoteBroStore: ObservableObject {
         }
     }
 
+    @Published var selectedTag: String? = nil
+
+    var allTags: [String] {
+        let tagsSet = Set(cards.flatMap { $0.hashtags })
+        return Array(tagsSet).sorted()
+    }
+
+    var activeCardIndices: [Int] {
+        if let tag = selectedTag {
+            return cards.enumerated().compactMap { idx, c in c.hashtags.contains(tag) ? idx : nil }
+        }
+        return Array(0..<cards.count)
+    }
+
+    var currentFilteredIndex: Int {
+        let indices = activeCardIndices
+        return indices.firstIndex(of: activeIndex) ?? 0
+    }
+
+    func togglePinCurrentCard() {
+        guard activeIndex >= 0, activeIndex < cards.count else { return }
+        cards[activeIndex].pinned.toggle()
+        // If pinned, reorder so pinned cards bubble to front
+        cards.sort { (a, b) -> Bool in
+            if a.pinned != b.pinned {
+                return a.pinned && !b.pinned
+            }
+            return a.updatedAt > b.updatedAt
+        }
+        activeIndex = 0
+        saveNotesImmediately()
+        NSSound(named: "Tink")?.play()
+    }
+
+    func toggleChecklist() {
+        guard activeIndex >= 0, activeIndex < cards.count else { return }
+        let current = cards[activeIndex].content
+        if current.isEmpty {
+            cards[activeIndex].content = "- [ ] "
+        } else if current.hasSuffix("\n") {
+            cards[activeIndex].content += "- [ ] "
+        } else {
+            cards[activeIndex].content += "\n- [ ] "
+        }
+        cards[activeIndex].updatedAt = Date()
+        saveNotes()
+        NSSound(named: "Pop")?.play()
+    }
+
     var currentCard: NoteCard? {
         guard !cards.isEmpty, activeIndex >= 0, activeIndex < cards.count else { return nil }
         return cards[activeIndex]
@@ -151,10 +225,12 @@ class NoteBroStore: ObservableObject {
             id: "card_\(UUID().uuidString.prefix(8))",
             content: "",
             color: NotePastel.allKeys.randomElement() ?? "yellow",
+            isPinned: false,
             createdAt: Date(),
             updatedAt: Date()
         )
         cards.append(newCard)
+        selectedTag = nil
         activeIndex = cards.count - 1
         saveNotesImmediately()
         NSSound(named: "Pop")?.play()
@@ -171,15 +247,19 @@ class NoteBroStore: ObservableObject {
     }
 
     func nextCard() {
-        if activeIndex < cards.count - 1 {
-            activeIndex += 1
+        let indices = activeCardIndices
+        guard !indices.isEmpty else { return }
+        if let currentPos = indices.firstIndex(of: activeIndex), currentPos < indices.count - 1 {
+            activeIndex = indices[currentPos + 1]
             NSSound(named: "Tink")?.play()
         }
     }
 
     func prevCard() {
-        if activeIndex > 0 {
-            activeIndex -= 1
+        let indices = activeCardIndices
+        guard !indices.isEmpty else { return }
+        if let currentPos = indices.firstIndex(of: activeIndex), currentPos > 0 {
+            activeIndex = indices[currentPos - 1]
             NSSound(named: "Tink")?.play()
         }
     }
@@ -334,7 +414,7 @@ struct NoteBroCardView: View {
                     .opacity(store.activeIndex == 0 ? 0.35 : 1.0)
                     .keyboardShortcut("[", modifiers: [.command])
 
-                    Text("\(store.activeIndex + 1)/\(max(store.cards.count, 1))")
+                    Text("\(store.currentFilteredIndex + 1)/\(max(store.activeCardIndices.count, 1))")
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
@@ -351,8 +431,8 @@ struct NoteBroCardView: View {
                             .overlay(RoundedRectangle(cornerRadius: 6).stroke(NotePastel.ink, lineWidth: 1.5))
                     }
                     .buttonStyle(.plain)
-                    .disabled(store.activeIndex >= store.cards.count - 1)
-                    .opacity(store.activeIndex >= store.cards.count - 1 ? 0.35 : 1.0)
+                    .disabled(store.currentFilteredIndex >= store.activeCardIndices.count - 1)
+                    .opacity(store.currentFilteredIndex >= store.activeCardIndices.count - 1 ? 0.35 : 1.0)
                     .keyboardShortcut("]", modifiers: [.command])
                 }
 
@@ -397,8 +477,53 @@ struct NoteBroCardView: View {
             }
             .padding(.horizontal, 14)
             .padding(.top, 12)
-            .padding(.bottom, 8)
+            .padding(.bottom, store.allTags.isEmpty ? 8 : 4)
             .background(NotePastel.paper)
+
+            // Hashtag Pills Bar (if tags exist)
+            if !store.allTags.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 5) {
+                        Button(action: { store.selectedTag = nil }) {
+                            Text("All (\(store.cards.count))")
+                                .font(.system(size: 10, weight: store.selectedTag == nil ? .bold : .medium, design: .monospaced))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2.5)
+                                .background(store.selectedTag == nil ? NotePastel.yellow : Color.white)
+                                .foregroundColor(NotePastel.ink)
+                                .clipShape(Capsule())
+                                .overlay(Capsule().stroke(NotePastel.ink, lineWidth: 1.2))
+                        }
+                        .buttonStyle(.plain)
+
+                        ForEach(store.allTags, id: \.self) { tag in
+                            Button(action: {
+                                if store.selectedTag == tag {
+                                    store.selectedTag = nil
+                                } else {
+                                    store.selectedTag = tag
+                                    if let firstMatch = store.activeCardIndices.first {
+                                        store.activeIndex = firstMatch
+                                    }
+                                }
+                            }) {
+                                Text(tag)
+                                    .font(.system(size: 10, weight: store.selectedTag == tag ? .bold : .medium, design: .monospaced))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2.5)
+                                    .background(store.selectedTag == tag ? NotePastel.mint : Color.white)
+                                    .foregroundColor(NotePastel.ink)
+                                    .clipShape(Capsule())
+                                    .overlay(Capsule().stroke(NotePastel.ink, lineWidth: 1.2))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 6)
+                }
+                .background(NotePastel.paper)
+            }
 
             // Index Card Border Accent Bar
             Rectangle()
@@ -437,11 +562,45 @@ struct NoteBroCardView: View {
             .frame(height: 330)
 
             // Footer / Metadata / Bro Tools
-            HStack {
+            HStack(spacing: 8) {
                 // Word count
                 Text("\(wordsCount) \(wordsCount == 1 ? "word" : "words")")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundColor(NotePastel.inkMuted)
+
+                // Pin Card Toggle Button
+                Button(action: { store.togglePinCurrentCard() }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: activeCard.pinned ? "pin.fill" : "pin")
+                            .font(.system(size: 10))
+                        if activeCard.pinned {
+                            Text("Pinned")
+                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(activeCard.pinned ? NotePastel.yellow : Color.white)
+                    .foregroundColor(NotePastel.ink)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(NotePastel.ink, lineWidth: 1.2))
+                }
+                .buttonStyle(.plain)
+                .help(activeCard.pinned ? "Unpin card" : "Pin card to front")
+
+                // Insert Checklist Button
+                Button(action: { store.toggleChecklist() }) {
+                    Text("☑︎ Todo")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.white)
+                        .foregroundColor(NotePastel.inkSoft)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(NotePastel.ink, lineWidth: 1.2))
+                }
+                .buttonStyle(.plain)
+                .help("Insert - [ ] checklist item")
 
                 Spacer()
 
@@ -526,7 +685,7 @@ struct NoteBroCardView: View {
                 alignment: .top
             )
         }
-        .frame(width: 410)
+        .frame(width: 420)
         .background(NotePastel.paper)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(
@@ -579,7 +738,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureStatusIcon(button: NSStatusBarButton) {
-        // Draw crisp index card / memo icon
+        if let image = NSImage(named: "bro-menubar") {
+            let icon = image.copy() as! NSImage
+            icon.size = NSSize(width: 18, height: 18)
+            icon.isTemplate = true
+            button.image = icon
+            return
+        }
+
+        // Draw crisp index card / memo icon as fallback
         let size = NSSize(width: 18, height: 18)
         let icon = NSImage(size: size, flipped: false) { rect in
             let cardRect = NSRect(x: 2, y: 1.5, width: 14, height: 15)
