@@ -5,7 +5,7 @@ set -e
 # Direct Distribution or MAS target
 
 APP_NAME="NoteBro"
-VERSION="1.0.0"
+VERSION="1.1.0"
 BUILD_NUMBER="1"
 SRC_FILES="NoteBroModel.swift NoteBro.swift NoteBroVaultSync.swift"
 BUILD_DIR="build"
