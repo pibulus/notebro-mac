@@ -86,12 +86,10 @@ struct NoteBroVaultSync {
         let envelope = VaultEnvelope(
             version: 1,
             app: appName,
-            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            updatedAt: NoteJSON.isoString(from: Date()),
             cards: cards
         )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let plaintext = try encoder.encode(envelope)
+        let plaintext = try NoteJSON.encoder.encode(envelope)
 
         // Generate 16-byte salt and 12-byte nonce
         var salt = Data(count: saltBytes)
@@ -137,9 +135,7 @@ struct NoteBroVaultSync {
         let sealedBox = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ciphertext, tag: tag)
         let decryptedData = try AES.GCM.open(sealedBox, using: key)
 
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let envelope = try decoder.decode(VaultEnvelope.self, from: decryptedData)
+        let envelope = try NoteJSON.decoder.decode(VaultEnvelope.self, from: decryptedData)
         return envelope.cards
     }
 

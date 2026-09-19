@@ -7,7 +7,7 @@ set -e
 APP_NAME="NoteBro"
 VERSION="1.0.0"
 BUILD_NUMBER="1"
-SRC_FILES="NoteBro.swift NoteBroVaultSync.swift"
+SRC_FILES="NoteBroModel.swift NoteBro.swift NoteBroVaultSync.swift"
 BUILD_DIR="build"
 DIST_DIR="dist"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
@@ -72,7 +72,11 @@ fi
 chmod +x "${BIN_DIR}/${APP_NAME}"
 
 # 4. Code Signing (Secure Timestamp enabled)
-ENTITLEMENTS="NoteBro.entitlements"
+if [ "${TARGET_MODE}" = "mas" ]; then
+    ENTITLEMENTS="NoteBro-MAS.entitlements"
+else
+    ENTITLEMENTS="NoteBro.entitlements"
+fi
 
 IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
            | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)"/\1/' || true)

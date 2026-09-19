@@ -2,61 +2,6 @@ import Cocoa
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - NoteBro Card Model
-struct NoteCard: Identifiable, Codable, Equatable {
-    var id: String
-    var content: String
-    var color: String // "yellow", "mint", "lavender", "peach", "sky"
-    var isPinned: Bool?
-    var createdAt: Date
-    var updatedAt: Date
-
-    var pinned: Bool {
-        get { isPinned ?? false }
-        set { isPinned = newValue }
-    }
-
-    var hashtags: [String] {
-        let pattern = "#([a-zA-Z0-9_-]+)"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let nsString = content as NSString
-        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsString.length))
-        var tags = [String]()
-        for m in matches {
-            if m.numberOfRanges > 1 {
-                let tag = "#" + nsString.substring(with: m.range(at: 1)).lowercased()
-                if !tags.contains(tag) {
-                    tags.append(tag)
-                }
-            }
-        }
-        return tags
-    }
-
-    static func defaultCard() -> NoteCard {
-        NoteCard(
-            id: "card_\(UUID().uuidString.prefix(8))",
-            content: """
-yo! welcome to NoteBro for Mac 📝
-
-• cursor is already blinking — just start typing
-• ⌘← and ⌘→ (or buttons above) flick between index cards
-• tap any pastel highlighter to color-code this card
-• use #hashtags like #ideas or #todo for instant filtering
-• ⌘N pulls a fresh card from the stack
-• ⌥Space brings NoteBro up from anywhere
-• close it or hit Esc — it's already saved
-
-in a world of Word, be Notepad. zero friction.
-""",
-            color: "yellow",
-            isPinned: true,
-            createdAt: Date(),
-            updatedAt: Date()
-        )
-    }
-}
-
 // MARK: - Pastel Palette
 enum NotePastel {
     static let yellow = Color(red: 0.996, green: 0.941, blue: 0.541) // #FEF08A
@@ -89,6 +34,10 @@ enum NotePastel {
 class NoteBroStore: ObservableObject {
     @Published var cards: [NoteCard] = []
     @Published var activeIndex: Int = 0
+    @Published var passportCode: String = ""
+    @Published var isSyncing: Bool = false
+    @Published var showSync: Bool = false
+    @Published var syncStatusMessage: String? = nil
 
     private let fileManager = FileManager.default
     private var saveDebounceTimer: Timer?
@@ -108,14 +57,57 @@ class NoteBroStore: ObservableObject {
 
     init() {
         loadNotes()
+        initSyncCode()
+    }
+
+    private func initSyncCode() {
+        let stored = UserDefaults.standard.string(forKey: "notebro_passport_code") ?? ""
+        if !stored.isEmpty {
+            self.passportCode = stored
+        } else {
+            let generated = NoteBroVaultSync.generatePassportCode()
+            self.passportCode = generated
+            UserDefaults.standard.set(generated, forKey: "notebro_passport_code")
+        }
+    }
+
+    func syncWithVault(code: String, completion: @escaping (Bool, String) -> Void) {
+        let norm = NoteBroVaultSync.normalizeCode(code)
+        guard !norm.isEmpty else {
+            completion(false, "Please enter a valid passport code")
+            return
+        }
+        self.passportCode = norm
+        UserDefaults.standard.set(norm, forKey: "notebro_passport_code")
+        self.isSyncing = true
+        self.syncStatusMessage = "Syncing with Vault…"
+
+        Task {
+            do {
+                let merged = try await NoteBroVaultSync.sync(cards: self.cards, code: norm)
+                await MainActor.run {
+                    self.cards = merged
+                    self.saveNotesImmediately()
+                    self.isSyncing = false
+                    self.syncStatusMessage = "Synced \(merged.count) cards!"
+                    NSSound(named: "Glass")?.play()
+                    completion(true, "Synced \(merged.count) cards with Vault!")
+                }
+            } catch {
+                await MainActor.run {
+                    self.isSyncing = false
+                    self.syncStatusMessage = "Sync error: \(error.localizedDescription)"
+                    completion(false, error.localizedDescription)
+                }
+            }
+        }
     }
 
     func loadNotes() {
         do {
             if fileManager.fileExists(atPath: storageFile.path) {
                 let data = try Data(contentsOf: storageFile)
-                let decoder = JSONDecoder()
-                let loaded = try decoder.decode([NoteCard].self, from: data)
+                let loaded = try NoteJSON.decoder.decode([NoteCard].self, from: data)
                 if !loaded.isEmpty {
                     self.cards = loaded
                     self.activeIndex = 0
@@ -143,9 +135,7 @@ class NoteBroStore: ObservableObject {
         saveDebounceTimer?.invalidate()
         saveDebounceTimer = nil
         do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = .prettyPrinted
-            let data = try encoder.encode(cards)
+            let data = try NoteJSON.encoder.encode(cards)
             try data.write(to: storageFile, options: .atomic)
         } catch {
             print("NoteBro: error saving notes: \(error)")
@@ -264,7 +254,7 @@ class NoteBroStore: ObservableObject {
         }
     }
 
-    func exportAllToMarkdown() -> URL? {
+    func exportAllToMarkdown(completion: @escaping (URL?) -> Void) {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
@@ -279,18 +269,34 @@ class NoteBroStore: ObservableObject {
             """
         }.joined(separator: "\n\n")
 
-        let desktop = fileManager.urls(for: .desktopDirectory, in: .userDomainMask).first!
-        let exportURL = desktop.appendingPathComponent("NoteBro-Export.md")
-        do {
-            try md.write(to: exportURL, atomically: true, encoding: .utf8)
-            return exportURL
-        } catch {
-            print("NoteBro: export error: \(error)")
-            return nil
+        let panel = NSSavePanel()
+        panel.title = "Export NoteBro Cards to Markdown"
+        panel.prompt = "Export"
+        panel.nameFieldStringValue = "NoteBro-Export.md"
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                do {
+                    try md.write(to: url, atomically: true, encoding: .utf8)
+                    NSSound(named: "Glass")?.play()
+                    completion(url)
+                } catch {
+                    print("NoteBro: export error: \(error)")
+                    completion(nil)
+                }
+            } else {
+                completion(nil)
+            }
         }
     }
 
     func openNotesFolder() {
+        if !fileManager.fileExists(atPath: storageDirectory.path) {
+            try? fileManager.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+        }
         NSWorkspace.shared.open(storageDirectory)
     }
 }
@@ -616,6 +622,7 @@ struct NoteBroCardView: View {
                 }) {
                     Text("Copy")
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(NotePastel.ink)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(Color.white)
@@ -639,9 +646,15 @@ struct NoteBroCardView: View {
 
                 // More Menu
                 Menu {
+                    Button("Vault Sync… (⌘S)") {
+                        store.showSync = true
+                    }
+                    .keyboardShortcut("s", modifiers: [.command])
+
                     Button("Export All to Markdown… (⌘E)") {
-                        if let url = store.exportAllToMarkdown() {
-                            withAnimation { exportToast = "Saved to Desktop!" }
+                        store.exportAllToMarkdown { url in
+                            guard let url else { return }
+                            withAnimation { exportToast = "Exported!" }
                             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                                 withAnimation { exportToast = nil }
                             }
@@ -657,10 +670,13 @@ struct NoteBroCardView: View {
                     Divider()
 
                     Button("NoteBro Web (notebro.app)") {
-                        if let url = URL(string: "https://notebro.app") {
-                            NSWorkspace.shared.open(url)
-                        }
+                        openWeb("")
                     }
+
+                    Button("Privacy") { openWeb("privacy") }
+                    Button("Support") { openWeb("support") }
+
+                    Divider()
 
                     Button("Quit NoteBro (⌘Q)") {
                         store.saveNotesImmediately()
@@ -673,7 +689,8 @@ struct NoteBroCardView: View {
                         .foregroundColor(NotePastel.inkSoft)
                 }
                 .menuStyle(.borderlessButton)
-                .frame(width: 22)
+                .menuIndicator(.hidden)
+                .fixedSize()
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
@@ -692,6 +709,101 @@ struct NoteBroCardView: View {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(NotePastel.ink, lineWidth: 2)
         )
+        .overlay {
+            if store.showSync {
+                NoteBroSyncPanel(store: store)
+            }
+        }
+    }
+
+    private func openWeb(_ path: String) {
+        guard let url = URL(string: "https://notebro.app/\(path)") else { return }
+        NSWorkspace.shared.open(url)
+    }
+}
+
+// MARK: - Vault Sync Panel
+struct NoteBroSyncPanel: View {
+    @ObservedObject var store: NoteBroStore
+    @State private var code: String = ""
+
+    var body: some View {
+        ZStack {
+            NotePastel.ink.opacity(0.22)
+                .onTapGesture { store.showSync = false }
+
+            panel
+                .padding(18)
+                .frame(width: 320)
+                .background(NotePastel.paper)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotePastel.ink, lineWidth: 2))
+                .shadow(color: NotePastel.ink.opacity(0.25), radius: 12, y: 4)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .onAppear { code = store.passportCode }
+    }
+
+    private var panel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Vault Sync")
+                .font(.system(size: 15, weight: .black, design: .monospaced))
+                .foregroundColor(NotePastel.ink)
+
+            Text("Cards travel encrypted. The passport code is the only key — the Vault never sees it.")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(NotePastel.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("BRO-XXXXXX", text: $code)
+                .textFieldStyle(.plain)
+                .font(.system(size: 16, weight: .bold, design: .monospaced))
+                .foregroundColor(NotePastel.ink)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(NotePastel.ink, lineWidth: 1.5))
+                .disabled(store.isSyncing)
+
+            HStack(spacing: 8) {
+                Button("Copy Code") {
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(code, forType: .string)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundColor(NotePastel.inkSoft)
+
+                Spacer()
+
+                Button("Close") { store.showSync = false }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundColor(NotePastel.inkSoft)
+
+                Button(store.isSyncing ? "Syncing…" : "Sync Now") {
+                    store.syncWithVault(code: code) { _, _ in }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .black, design: .monospaced))
+                .foregroundColor(NotePastel.ink)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(NotePastel.mint)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(NotePastel.ink, lineWidth: 1.5))
+                .disabled(store.isSyncing)
+            }
+
+            if let status = store.syncStatusMessage {
+                Text(status)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundColor(NotePastel.inkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 
@@ -722,7 +834,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 2. Popover
         popover = NSPopover()
-        popover.contentSize = NSSize(width: 410, height: 430)
+        popover.contentSize = NSSize(width: 420, height: 430) // must match NoteBroCardView.frame or the ⋯ menu clips
         popover.behavior = .transient
         popover.animates = true
 
@@ -791,6 +903,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if popover.isShown {
             store.saveNotesImmediately()
+            store.showSync = false
             popover.performClose(nil)
         } else {
             NSApp.activate(ignoringOtherApps: true)
@@ -817,6 +930,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Esc closes popover
             if event.keyCode == 53 {
                 self?.store.saveNotesImmediately()
+                // Esc backs out of the sync panel first, then closes the popover.
+                if self?.store.showSync == true {
+                    self?.store.showSync = false
+                    return nil
+                }
                 self?.popover.performClose(nil)
                 return nil
             }
