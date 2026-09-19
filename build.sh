@@ -99,4 +99,26 @@ else
     echo "🔏 Ad-hoc signed for local execution"
 fi
 
+# 5. Build DMG for Direct Distribution
+echo "💿 Creating DMG disk image..."
+DMG_STAGE="${BUILD_DIR}/dmg_stage"
+mkdir -p "${DMG_STAGE}"
+cp -R "${APP_DIR}" "${DMG_STAGE}/"
+ln -s /Applications "${DMG_STAGE}/Applications"
+
+hdiutil create -volname "${APP_NAME}" \
+        -srcfolder "${DMG_STAGE}" \
+        -ov -format UDZO \
+        "${DIST_DIR}/${APP_NAME}-${VERSION}.dmg" > /dev/null
+        
+rm -rf "${DMG_STAGE}"
+
+# Sign the DMG disk image container
+if [ -n "${IDENTITY}" ]; then
+    codesign --force --sign "${IDENTITY}" --timestamp "${DIST_DIR}/${APP_NAME}-${VERSION}.dmg"
+    echo "🔏 Signed DMG container with Developer ID: ${IDENTITY}"
+fi
+
+echo "✨ Direct DMG ready at ${DIST_DIR}/${APP_NAME}-${VERSION}.dmg"
 echo "✨ Built NoteBro.app at ${APP_DIR}"
+
