@@ -7,7 +7,7 @@ set -e
 APP_NAME="NoteBro"
 VERSION="1.0.0"
 BUILD_NUMBER="1"
-SRC_FILE="NoteBro.swift"
+SRC_FILES="NoteBro.swift NoteBroVaultSync.swift"
 BUILD_DIR="build"
 DIST_DIR="dist"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
@@ -27,7 +27,7 @@ SWIFT_FLAGS="-parse-as-library -O -target arm64-apple-macos13.0"
 if [ "${TARGET_MODE}" = "mas" ]; then
     SWIFT_FLAGS="${SWIFT_FLAGS} -D MAS_BUILD"
 fi
-swiftc ${SWIFT_FLAGS} "${SRC_FILE}" -o "${BIN_DIR}/${APP_NAME}"
+swiftc ${SWIFT_FLAGS} ${SRC_FILES} -o "${BIN_DIR}/${APP_NAME}"
 
 # 2. Generate Production Info.plist
 cat > "${APP_DIR}/Contents/Info.plist" << PLIST
