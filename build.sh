@@ -22,12 +22,21 @@ echo "🎨 Building ${APP_NAME} v${VERSION} (${TARGET_MODE} target)..."
 rm -rf "${BUILD_DIR}" "${DIST_DIR}"
 mkdir -p "${BIN_DIR}" "${RES_DIR}" "${DIST_DIR}"
 
-# 1. Compile Swift executable (Apple Silicon optimized)
-SWIFT_FLAGS="-parse-as-library -O -target arm64-apple-macos13.0"
+# 1. Compile Swift executable (Universal arm64 + x86_64 by default)
+UNIVERSAL="${UNIVERSAL:-1}"
+SWIFT_FLAGS="-parse-as-library -O"
 if [ "${TARGET_MODE}" = "mas" ]; then
     SWIFT_FLAGS="${SWIFT_FLAGS} -D MAS_BUILD"
 fi
-swiftc ${SWIFT_FLAGS} ${SRC_FILES} -o "${BIN_DIR}/${APP_NAME}"
+if [ "${UNIVERSAL}" = "1" ]; then
+    swiftc ${SWIFT_FLAGS} -target arm64-apple-macos13.0 ${SRC_FILES} -o "${BUILD_DIR}/${APP_NAME}-arm64"
+    swiftc ${SWIFT_FLAGS} -target x86_64-apple-macos13.0 ${SRC_FILES} -o "${BUILD_DIR}/${APP_NAME}-x86_64"
+    lipo -create "${BUILD_DIR}/${APP_NAME}-arm64" "${BUILD_DIR}/${APP_NAME}-x86_64" -output "${BIN_DIR}/${APP_NAME}"
+    rm -f "${BUILD_DIR}/${APP_NAME}-arm64" "${BUILD_DIR}/${APP_NAME}-x86_64"
+    echo "🧬 Universal binary verified ($(lipo -archs "${BIN_DIR}/${APP_NAME}"))"
+else
+    swiftc ${SWIFT_FLAGS} -target arm64-apple-macos13.0 ${SRC_FILES} -o "${BIN_DIR}/${APP_NAME}"
+fi
 
 # 2. Generate Production Info.plist
 cat > "${APP_DIR}/Contents/Info.plist" << PLIST
@@ -127,9 +136,13 @@ fi
 # 5. Build DMG for Direct Distribution
 echo "💿 Creating DMG disk image..."
 DMG_STAGE="${BUILD_DIR}/dmg_stage"
+rm -rf "${DMG_STAGE}"
 mkdir -p "${DMG_STAGE}"
+chmod 0755 "${DMG_STAGE}"
 cp -R "${APP_DIR}" "${DMG_STAGE}/"
 ln -s /Applications "${DMG_STAGE}/Applications"
+chmod -R u+rwX,go+rX "${DMG_STAGE}"
+chmod 0755 "${DMG_STAGE}"
 
 hdiutil create -volname "${APP_NAME}" \
         -srcfolder "${DMG_STAGE}" \
